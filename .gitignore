@@ -3,3 +3,7 @@ MQTTCarPresence/config.h
 
 # macOS
 .DS_Store
+
+# Notes about my own Home Assistant setup (this repo is public)
+*.local.md
+*.local/
