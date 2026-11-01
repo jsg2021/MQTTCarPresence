@@ -1,13 +1,20 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-// Modify these values for your environment
-const char *wifiSSID = "wifissid";                  // Your WiFi network name
-const char *wifiPassword = "wifipassword";          // Your WiFi network password
-const char *otaPassword = "";                       // OTA update password
-const char *mqttServer = "hassio.local";            // Your MQTT server IP address
-const char *mqttUser = "";                          // mqtt username, set to "" for no user
-const char *mqttPassword = "";                      // mqtt password, set to "" for no password
-const String mqttNode = "CarPresence";              // Your unique hostname for this device
-const String mqttDiscoveryPrefix = "homeassistant"; // Home Assistant MQTT Discovery, see https://home-assistant.io/docs/mqtt/discovery/
+// Settings live in config.h, which is git-ignored so credentials are never committed.
+// Copy config.example.h to config.h, fill in your values and pick a car profile.
+#if __has_include("config.h")
+#include "config.h"
+#else
+#error "config.h not found: copy config.example.h to config.h and fill in your settings"
+#endif
+
+const char *wifiSSID = WIFI_SSID;
+const char *wifiPassword = WIFI_PASSWORD;
+const char *otaPassword = OTA_PASSWORD;
+const char *mqttServer = MQTT_SERVER;
+const char *mqttUser = MQTT_USER;
+const char *mqttPassword = MQTT_PASSWORD;
+const String mqttNode = MQTT_NODE;
+const String mqttDiscoveryPrefix = MQTT_DISCOVERY_PREFIX;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Home Assistant MQTT Discovery, see https://home-assistant.io/docs/mqtt/discovery/

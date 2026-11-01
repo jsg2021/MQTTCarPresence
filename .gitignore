@@ -1,0 +1,5 @@
+# Local settings with credentials (template: MQTTCarPresence/config.example.h)
+MQTTCarPresence/config.h
+
+# macOS
+.DS_Store
