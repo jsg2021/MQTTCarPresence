@@ -6,6 +6,7 @@
 > * **Support for cars with no ignition-switched fuse.** An optional voltage gate reads the car's 12V on A0, so the board only goes online while the engine is running and deep sleeps otherwise. See [Power options](#power-options).
 > * **Departure detection.** Starting the car while it's parked at home no longer reports presence, so it doesn't trigger a garage-open on the way out. See [Departure detection](#departure-detection).
 > * **Long-term stability fixes.** Non-blocking Wi-Fi, MQTT reconnect with backoff, rollover-safe timers, no `String` churn in the main loop and a low-memory restart as a last resort.
+> * **Garage door history.** The blueprints write the reason for each open and close to the Home Assistant logbook, so a dashboard card can show why the door moved. See [Garage door history](#garage-door-history).
 
 This project utilizes a [WeMos D1 mini Pro](https://wiki.wemos.cc/products:d1:d1_mini_pro), u.FL to SMA antenna whip, and an external antenna in a 3D-printed enclosure to indicate presense when powered on and attached to MQTT.
 
@@ -15,7 +16,7 @@ This project utilizes a [WeMos D1 mini Pro](https://wiki.wemos.cc/products:d1:d1
 
 [The included Home Assistant blueprint automation](MQTTCarPresence.yaml) example utilizes this information to open or close a connected garage door. Just copy the file url into the blueprint import menu and create an automation using the blueprint!
 
-[![Open your Home Assistant instance and show the blueprint import dialog with a specific blueprint pre-filled.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fraw.githubusercontent.com%2Faderusha%2FMQTTCarPresence%2Fmaster%2FMQTTCarPresence.yaml)
+[![Open your Home Assistant instance and show the blueprint import dialog with a specific blueprint pre-filled.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fraw.githubusercontent.com%2Fjsg2021%2FMQTTCarPresence%2Fmain%2FMQTTCarPresence.yaml)
 
 ## Workflow - User perspective
 
@@ -130,6 +131,29 @@ This changes the workflows above. Starting the car in the garage **does not open
 
 The timings (`departureWindowMs`, `departureClearMs`, `parkedSleepWakes`) are near the top of the sketch.
 
+## Garage door history
+
+Each time the blueprint opens or closes the door, it first adds a logbook entry with the reason, attached to the garage door entity:
+
+* `opened by car presence: CarPresenceRight arrived home`
+* `closed by car presence: CarPresenceRight left or was turned off (offline for 1 minute)`
+
+To look these up, add a Logbook card to a dashboard (Edit dashboard → Add card → Manual) and change the entity IDs to match yours:
+
+```yaml
+type: logbook
+title: Garage door history
+hours_to_show: 168
+entities:
+  - cover.garage_door
+  - binary_sensor.carpresenceright
+  - binary_sensor.carpresenceleft
+```
+
+The card lists every open and close of the door, not just the automatic ones. Car presence moves show the entry above. Opens from the app or another automation show Home Assistant's own "triggered by" note. Opens from a wall button or remote have no reason attached. Including the presence sensors shows when each car came and went, which helps explain a door that didn't move. Change `hours_to_show` to look further back; how far you can go depends on your recorder's `purge_keep_days` (10 days by default).
+
+If you imported the blueprint before this was added, the copy in Home Assistant still points at the original repository, so **Re-import blueprint** won't pick up the change. Import it again from the button above, or replace the file in `config/blueprints/automation/` with the one from this repository, then reload automations.
+
 ## Over-the-air updates
 
 OTA is off unless `OTA_PASSWORD` is set in `config.h`. Set a password and flash once over USB. After that, with the car on and connected to Wi-Fi, the board appears in the Arduino IDE under Tools → Port as a network port named after `MQTT_NODE`. Your computer must be on the same network (or VLAN) as the board.
@@ -158,7 +182,7 @@ This Tasmota Variant is set-up to work with [Home Assistant Tasmota Integration]
 * Go to Configure Other and be sure to set a Web Admin Password in case it goes into AP mode when you are away from Home.
 * Set-up the blueprint `MQTT_Tasmota_CarPresence.yaml` similar to the instructions for the other blueprint above.
 
-[![Open your Home Assistant instance and show the blueprint import dialog with a specific blueprint pre-filled.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Faderusha%2FMQTTCarPresence%2Fblob%2Fmaster%2FMQTT_Tasmota_CarPresence.yaml)
+[![Open your Home Assistant instance and show the blueprint import dialog with a specific blueprint pre-filled.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fraw.githubusercontent.com%2Fjsg2021%2FMQTTCarPresence%2Fmain%2FMQTT_Tasmota_CarPresence.yaml)
 
 ## Buy me a coffee
 

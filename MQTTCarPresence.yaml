@@ -2,7 +2,7 @@ blueprint:
   name: MQTTCarPresence
   author: aderusha (Luma)
   description: Open garage door when car connects to Wi-Fi
-  source_url: https://github.com/aderusha/MQTTCarPresence/blob/master/MQTTCarPresence.yaml
+  source_url: https://github.com/jsg2021/MQTTCarPresence/blob/main/MQTTCarPresence.yaml
   domain: automation
   homeassistant:
     min_version: 2023.6.2
@@ -22,6 +22,11 @@ blueprint:
           filter:
             - domain: binary_sensor
 mode: single
+variables:
+  garage_door: !input garage_door
+  door_name: "{{ state_attr(garage_door, 'friendly_name') or garage_door }}"
+  car_presence: !input car_presence
+  car_name: "{{ state_attr(car_presence, 'friendly_name') or car_presence }}"
 trigger:
   - platform: state
     entity_id: !input car_presence
@@ -42,6 +47,11 @@ action:
             entity_id: !input garage_door
             state: closed
         sequence:
+          - service: logbook.log
+            data:
+              name: "{{ door_name }}"
+              message: "opened by car presence: {{ car_name }} arrived home"
+              entity_id: !input garage_door
           - service: cover.open_cover
             entity_id: !input garage_door
       - conditions:
@@ -52,6 +62,11 @@ action:
             entity_id: !input garage_door
             state: open
         sequence:
+          - service: logbook.log
+            data:
+              name: "{{ door_name }}"
+              message: "closed by car presence: {{ car_name }} left or was turned off (offline for 1 minute)"
+              entity_id: !input garage_door
           - service: cover.close_cover
             entity_id: !input garage_door
     default: []
