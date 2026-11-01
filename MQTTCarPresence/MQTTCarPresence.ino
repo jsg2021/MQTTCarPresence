@@ -7,6 +7,16 @@
 #error "config.h not found: copy config.example.h to config.h and fill in your settings"
 #endif
 
+#ifndef USE_VOLTAGE_GATE
+#define USE_VOLTAGE_GATE false
+#endif
+#ifndef ADC_FULL_SCALE_VOLTS
+#define ADC_FULL_SCALE_VOLTS 18.2f
+#endif
+#ifndef VOLTS_CALIBRATION
+#define VOLTS_CALIBRATION 1.0f
+#endif
+
 const char *wifiSSID = WIFI_SSID;
 const char *wifiPassword = WIFI_PASSWORD;
 const char *otaPassword = OTA_PASSWORD;
@@ -17,28 +27,81 @@ const String mqttNode = MQTT_NODE;
 const String mqttDiscoveryPrefix = MQTT_DISCOVERY_PREFIX;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// Power source
+//
+// false: Ignition-switched supply (an accessory circuit that's only live while the car runs).
+//   - No A0 wiring and no D0-RST jumper needed; the board runs whenever the adapter has power.
+//   - Every ignition-on is a fresh boot. If home Wi-Fi connects within departureWindowMs, the car
+//     is leaving and presence stays OFF. A later connection, after being out of range for at
+//     least departureClearMs, counts as an arrival and publishes ON.
+//   - When the car shuts off, power is cut and the MQTT last will sets presence OFF within ~20s.
+//   - No voltage sensor is published (A0 is unused).
+//   - Shut-off test after install: turn the car off, lock it, open a door a few minutes later and
+//     watch the sensor in Home Assistant. It must stay OFF. If it comes back ON, the adapter is
+//     not truly ignition-switched; use a constant fuse with useVoltageGate = true instead.
+//
+// true: Constant power (a fuse tap in the cabin fuse box).
+//   - Needs the car's 12V on A0 and D0 jumpered to RST (see wiring below).
+//   - Only turns Wi-Fi on while the alternator is charging, deep sleeps otherwise.
+//   - Publishes a CarPresenceRight-voltage sensor for tuning and calibration.
+//   - Set ADC_FULL_SCALE_VOLTS in config.h to match the divider: 18.2f for a 1.5M series
+//     resistor, 16.0f for a 0-25V voltage sensor module.
+const bool useVoltageGate = USE_VOLTAGE_GATE; // set per car in config.h
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// Engine detection (voltage gate) and deep sleep -- only used when useVoltageGate is true
+//
+// Wiring:  12V fuse tap --[ 1.5M ]--+-- A0
+//                                   |
+//                                [0.1uF]
+//                                   |
+//                                  GND
+//          D0 jumpered to RST (required for deep-sleep wake; pull it if USB flashing fails)
+//
+// The D1 Mini's onboard 220k/100k divider plus the 1.5M gives ~18.2V full scale on A0.
+// After install, compare the published voltage to a multimeter at the fuse and set
+// VOLTS_CALIBRATION = multimeter / reported (in config.h).
+const float adcFullScaleVolts = ADC_FULL_SCALE_VOLTS; // set per car in config.h
+float voltsCalibration = VOLTS_CALIBRATION; // set per car in config.h
+
+const float engineOnVolts = 13.1f;               // boot only proceeds above this (alternator charging)
+const float engineOffVolts = 12.9f;              // below this counts as "engine off"
+const unsigned long engineOffHoldMs = 180000;    // must stay below engineOffVolts this long before sleeping
+                                                 // (long enough to ride out smart-charging dips)
+const uint32_t sleepIntervalUs = 20000000UL;     // engine-off check interval while asleep (20s)
+const unsigned long voltsSampleMs = 1000;        // don't read A0 faster than this while Wi-Fi is on
+
+// Departure detection: if the car had been parked (asleep at least parkedSleepWakes in a row) and Wi-Fi
+// connects within departureWindowMs of engine start, the car started at home and is leaving, so presence
+// stays OFF. Presence goes ON only on a later connection, after Wi-Fi has been out of range for at least
+// departureClearMs (the car actually left and came back). A short sleep from a smart-charging voltage
+// dip while driving doesn't count as parked, so pulling in after one still reads as an arrival.
+const unsigned long departureWindowMs = 90000;
+const unsigned long departureClearMs = 120000;
+const uint32_t parkedSleepWakes = 30;            // 30 x 20s = 10 minutes asleep
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 // Home Assistant MQTT Discovery, see https://home-assistant.io/docs/mqtt/discovery/
-// We'll create one binary_sensor device to track MQTT connectivity
+// Topics and names for the binary sensor are unchanged so existing automations keep working.
 const String mqttDiscoBinaryStateTopic = mqttDiscoveryPrefix + "/binary_sensor/" + mqttNode + "/state";
 const String mqttDiscoBinaryConfigTopic = mqttDiscoveryPrefix + "/binary_sensor/" + mqttNode + "/config";
-// And a sensor for WiFi signal strength
 const String mqttDiscoSignalStateTopic = mqttDiscoveryPrefix + "/sensor/" + mqttNode + "-signal/state";
 const String mqttDiscoSignalConfigTopic = mqttDiscoveryPrefix + "/sensor/" + mqttNode + "-signal/config";
-// And a sensor for device uptime
 const String mqttDiscoUptimeStateTopic = mqttDiscoveryPrefix + "/sensor/" + mqttNode + "-uptime/state";
 const String mqttDiscoUptimeConfigTopic = mqttDiscoveryPrefix + "/sensor/" + mqttNode + "-uptime/config";
+// New: car battery voltage, for tuning the thresholds above
+const String mqttDiscoVoltsStateTopic = mqttDiscoveryPrefix + "/sensor/" + mqttNode + "-voltage/state";
+const String mqttDiscoVoltsConfigTopic = mqttDiscoveryPrefix + "/sensor/" + mqttNode + "-voltage/config";
 
 const String mqttDiscoBinaryConfigPayload = "{\"name\": \"" + mqttNode + "\", \"device_class\": \"connectivity\", \"state_topic\": \"" + mqttDiscoBinaryStateTopic + "\"}";
 const String mqttDiscoSignalConfigPayload = "{\"name\": \"" + mqttNode + "-signal\", \"state_topic\": \"" + mqttDiscoSignalStateTopic + "\", \"unit_of_measurement\": \"dBm\", \"value_template\": \"{{ value }}\"}";
 const String mqttDiscoUptimeConfigPayload = "{\"name\": \"" + mqttNode + "-uptime\", \"state_topic\": \"" + mqttDiscoUptimeStateTopic + "\", \"unit_of_measurement\": \"msec\", \"value_template\": \"{{ value }}\"}";
+const String mqttDiscoVoltsConfigPayload = "{\"name\": \"" + mqttNode + "-voltage\", \"state_topic\": \"" + mqttDiscoVoltsStateTopic + "\", \"unit_of_measurement\": \"V\", \"device_class\": \"voltage\", \"state_class\": \"measurement\"}";
 
-// Set the signal strength and uptime reporting interval in milliseconds
+// Reporting and LED timing
 const unsigned long reportInterval = 5000;
-unsigned long reportTimer = millis();
-
-// Set LED "twinkle" time for maximum daylight visibility
 const unsigned long twinkleInterval = 50;
-unsigned long twinkleTimer = millis();
 
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
@@ -49,175 +112,295 @@ unsigned long twinkleTimer = millis();
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 
+// Runtime state (all timers use "millis() - start >= interval", which is rollover-safe)
+float carVolts = 0;
+unsigned long lastVoltsSampleMs = 0;
+unsigned long lastEngineOnMs = 0;
+unsigned long reportTimer = 0;
+unsigned long twinkleTimer = 0;
+unsigned long lastMqttAttemptMs = 0;
+unsigned long mqttRetryMs = 0;                   // backoff, grows to 60s on repeated failures
+unsigned long wifiLostMs = 0;
+bool wifiWasConnected = false;
+bool everConnected = false;
+bool departureSession = false;
+bool otaStarted = false;
+bool wasParked = true;
+
+// Survives deep sleep (RTC user memory), reset on power loss
+struct RtcState
+{
+  uint32_t magic;
+  uint32_t offWakes; // consecutive engine-off wakes since the engine last ran
+};
+const uint32_t rtcMagic = 0xCA5E0001;
+RtcState rtcState;
+
+void saveRtc() { ESP.rtcUserMemoryWrite(0, (uint32_t *)&rtcState, sizeof(rtcState)); }
+
+float readCarVolts();
+void goToSleep();
+bool mqttConnect();
+void setupOTA();
+const char *presenceState() { return departureSession ? "OFF" : "ON"; }
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // System setup
 void setup()
 {
+  // Keep the radio off until we know the engine is running. With useVoltageGate = false there is
+  // nothing to wait for (the board only has power with the ignition on), so the radio comes on
+  // right after this, a few milliseconds into boot.
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_OFF);
+  WiFi.forceSleepBegin();
+  delay(1);
+
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, HIGH);
   Serial.begin(115200);
 
-  Serial.println("\nHardware initialized, starting program load");
-
-  // Start up networking
-  setupWifi();
-
-  // Create server and assign callbacks for MQTT
-  mqttClient.setServer(mqttServer, 1883);
-  mqttClient.setCallback(mqtt_callback);
-
-// The string payloads spill over the default MAX_PACKET_SIZE 128.
-  mqttClient.setBufferSize(512);
-
-  mqttConnect();
-
-  // Start up OTA
-  if (otaPassword[0])
+  ESP.rtcUserMemoryRead(0, (uint32_t *)&rtcState, sizeof(rtcState));
+  if (rtcState.magic != rtcMagic)
   {
-    setupOTA();
+    // Fresh power-up: treat as parked
+    rtcState.magic = rtcMagic;
+    rtcState.offWakes = parkedSleepWakes;
   }
 
-  Serial.println("Initialization complete\n");
+  carVolts = useVoltageGate ? readCarVolts() : 0;
+  Serial.printf("\nBoot, car voltage %.2fV, %u engine-off wakes\n", carVolts, rtcState.offWakes);
+  if (useVoltageGate && carVolts < engineOnVolts)
+  {
+    if (rtcState.offWakes < parkedSleepWakes)
+    {
+      rtcState.offWakes++;
+    }
+    saveRtc();
+    goToSleep(); // does not return
+  }
+
+  wasParked = (rtcState.offWakes >= parkedSleepWakes);
+  rtcState.offWakes = 0;
+  saveRtc();
+
+  Serial.println(useVoltageGate ? "Engine running, starting Wi-Fi" : "Ignition on, starting Wi-Fi");
+  WiFi.forceSleepWake();
+  delay(1);
+  WiFi.hostname(mqttNode.c_str());
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(wifiSSID, wifiPassword); // non-blocking; loop() watches the status
+
+  mqttClient.setServer(mqttServer, 1883);
+  mqttClient.setBufferSize(512);  // discovery payloads exceed the default 128
+  mqttClient.setSocketTimeout(5); // don't stall loop() for 15s when the broker is unreachable
+  mqttClient.setKeepAlive(15);
+
+  lastEngineOnMs = millis();
+  lastVoltsSampleMs = millis();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // Main execution loop
 void loop()
 {
-  // check WiFi connection
-  if (WiFi.status() != WL_CONNECTED)
+  unsigned long now = millis();
+
+  // Engine check
+  if (useVoltageGate && now - lastVoltsSampleMs >= voltsSampleMs)
   {
-    setupWifi();
+    lastVoltsSampleMs = now;
+    carVolts = readCarVolts();
+    if (carVolts >= engineOffVolts)
+    {
+      lastEngineOnMs = now;
+    }
+    else if (now - lastEngineOnMs >= engineOffHoldMs)
+    {
+      goToSleep(); // does not return
+    }
   }
 
-  // check MQTT connection
-  if (!mqttClient.connected())
+  bool wifiUp = (WiFi.status() == WL_CONNECTED);
+
+  if (wifiUp && !wifiWasConnected)
   {
-    mqttConnect();
+    Serial.printf("Wi-Fi connected, IP %s\n", WiFi.localIP().toString().c_str());
+    if (!everConnected)
+    {
+      everConnected = true;
+      departureSession = wasParked && (now < departureWindowMs);
+      if (departureSession)
+      {
+        Serial.println("Connected right after engine start: departing, presence stays OFF");
+      }
+    }
+    mqttRetryMs = 0; // connect to MQTT right away
+  }
+  else if (!wifiUp && wifiWasConnected)
+  {
+    Serial.println("Wi-Fi lost");
+    wifiLostMs = now;
+    digitalWrite(LED_BUILTIN, HIGH);
+  }
+  else if (!wifiUp && departureSession && (now - wifiLostMs >= departureClearMs))
+  {
+    Serial.println("Out of Wi-Fi range long enough: next connection counts as arrival");
+    departureSession = false;
+  }
+  wifiWasConnected = wifiUp;
+
+  if (wifiUp)
+  {
+    if (!otaStarted && otaPassword[0])
+    {
+      setupOTA();
+      otaStarted = true;
+    }
+
+    if (!mqttClient.connected())
+    {
+      if (now - lastMqttAttemptMs >= mqttRetryMs)
+      {
+        lastMqttAttemptMs = now;
+        if (mqttConnect())
+        {
+          mqttRetryMs = 2000;
+        }
+        else
+        {
+          mqttRetryMs = (mqttRetryMs < 2000) ? 2000 : min(mqttRetryMs * 2, 60000UL);
+        }
+      }
+    }
+    else
+    {
+      mqttClient.loop();
+
+      if (now - twinkleTimer >= twinkleInterval)
+      {
+        digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+        twinkleTimer = now;
+      }
+
+      if (now - reportTimer >= reportInterval)
+      {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d", WiFi.RSSI());
+        mqttClient.publish(mqttDiscoSignalStateTopic.c_str(), buf);
+        snprintf(buf, sizeof(buf), "%lu", now);
+        mqttClient.publish(mqttDiscoUptimeStateTopic.c_str(), buf);
+        if (useVoltageGate)
+        {
+          snprintf(buf, sizeof(buf), "%.2f", carVolts);
+          mqttClient.publish(mqttDiscoVoltsStateTopic.c_str(), buf);
+        }
+        mqttClient.publish(mqttDiscoBinaryStateTopic.c_str(), presenceState());
+        reportTimer = now;
+      }
+    }
+
+    if (otaStarted)
+    {
+      ArduinoOTA.handle();
+    }
   }
 
-  // MQTT client loop
-  if (mqttClient.connected())
+  // Last-resort safety net: restart cleanly instead of limping along with a starved heap
+  if (ESP.getFreeHeap() < 6000)
   {
-    mqttClient.loop();
+    Serial.println("Low heap, restarting");
+    Serial.flush();
+    ESP.restart();
   }
 
-  // LED twinkle
-  if (mqttClient.connected() && ((millis() - twinkleTimer) >= twinkleInterval))
-  {
-    digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-    twinkleTimer = millis();
-  }
-
-  // Report signal strength and uptime
-  if (mqttClient.connected() && ((millis() - reportTimer) >= reportInterval))
-  {
-    String signalStrength = String(WiFi.RSSI());
-    String uptimeTimer = String(millis());
-    mqttClient.publish(mqttDiscoSignalStateTopic.c_str(), signalStrength.c_str());
-    mqttClient.publish(mqttDiscoUptimeStateTopic.c_str(), uptimeTimer.c_str());
-    reportTimer = millis();
-  }
-
-  // OTA loop
-  if (otaPassword[0])
-  {
-    ArduinoOTA.handle();
-  }
+  delay(10); // yield to the Wi-Fi stack
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // Functions
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
-// Handle incoming commands from MQTT
-void mqtt_callback(char *topic, byte *payload, unsigned int payloadLength)
+// Average a few A0 samples and convert to car volts
+float readCarVolts()
 {
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-// Connect to WiFi
-void setupWifi()
-{
-  Serial.print("Connecting to WiFi network: " + String(wifiSSID));
-  WiFi.hostname(mqttNode.c_str());
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleepMode(WIFI_NONE_SLEEP);
-  WiFi.begin(wifiSSID, wifiPassword);
-
-  while (WiFi.status() != WL_CONNECTED)
+  uint32_t sum = 0;
+  const int samples = 8;
+  for (int i = 0; i < samples; i++)
   {
-    delay(1);
+    sum += analogRead(A0);
+    delay(2);
   }
-  Serial.println("\nWiFi connected successfully and assigned IP: " + WiFi.localIP().toString());
+  return (sum / (float)samples) * adcFullScaleVolts / 1023.0f * voltsCalibration;
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
-// MQTT connection and subscriptions
-void mqttConnect()
+// Report OFF, shut the radio down and deep sleep. Wakes via D0->RST and reboots into setup().
+void goToSleep()
+{
+  if (mqttClient.connected())
+  {
+    mqttClient.publish(mqttDiscoBinaryStateTopic.c_str(), "OFF", true);
+    mqttClient.loop();
+    delay(50);
+    mqttClient.disconnect();
+  }
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  WiFi.forceSleepBegin();
+  digitalWrite(LED_BUILTIN, HIGH);
+  Serial.printf("Engine off (%.2fV), sleeping\n", carVolts);
+  Serial.flush();
+  ESP.deepSleep(sleepIntervalUs);
+}
+
+// MQTT connection and discovery. Returns true when connected.
+bool mqttConnect()
 {
   digitalWrite(LED_BUILTIN, HIGH);
-  Serial.println("Attempting MQTT connection to broker: " + String(mqttServer));
-  // Attempt to connect to broker, setting last will and testament
-  if (mqttClient.connect(mqttNode.c_str(), mqttUser, mqttPassword, mqttDiscoBinaryStateTopic.c_str(), 1, 1, "OFF"))
+  Serial.printf("Attempting MQTT connection to broker: %s\n", mqttServer);
+  // Last will: broker marks us OFF if we vanish (power cut, out of range)
+  if (!mqttClient.connect(mqttNode.c_str(), mqttUser, mqttPassword, mqttDiscoBinaryStateTopic.c_str(), 1, true, "OFF"))
   {
-    // when connected, record signal strength and reset reporting timer
-    String signalStrength = String(WiFi.RSSI());
-    reportTimer = millis();
-    String uptimeTimer = String(millis());
-    // publish MQTT discovery topics and device state
-    Serial.println("MQTT discovery connectivity config: [" + mqttDiscoBinaryConfigTopic + "] : [" + mqttDiscoBinaryConfigPayload + "]");
-    Serial.println("MQTT discovery connectivity state: [" + mqttDiscoBinaryStateTopic + "] : [ON]");
-    Serial.println("MQTT discovery signal config: [" + mqttDiscoSignalConfigTopic + "] : [" + mqttDiscoSignalConfigPayload + "]");
-    Serial.println("MQTT discovery signal state: [" + mqttDiscoSignalStateTopic + "] : " + WiFi.RSSI());
-    Serial.println("MQTT discovery uptime config: [" + mqttDiscoUptimeConfigTopic + "] : [" + mqttDiscoUptimeConfigPayload + "]");
-    Serial.println("MQTT discovery uptime state: [" + mqttDiscoUptimeStateTopic + "] : " + uptimeTimer);
-    mqttClient.publish(mqttDiscoUptimeConfigTopic.c_str(), mqttDiscoUptimeConfigPayload.c_str(), true);
-    mqttClient.publish(mqttDiscoUptimeStateTopic.c_str(), uptimeTimer.c_str());
-    mqttClient.publish(mqttDiscoBinaryConfigTopic.c_str(), mqttDiscoBinaryConfigPayload.c_str(), true);
-    mqttClient.publish(mqttDiscoBinaryStateTopic.c_str(), "ON");
-    mqttClient.publish(mqttDiscoSignalConfigTopic.c_str(), mqttDiscoSignalConfigPayload.c_str(), true);
-    mqttClient.publish(mqttDiscoSignalStateTopic.c_str(), signalStrength.c_str());
-    Serial.println("MQTT connected");
-    digitalWrite(LED_BUILTIN, LOW);
+    Serial.printf("MQTT connection failed, rc=%d\n", mqttClient.state());
+    return false;
   }
-  else
+
+  char buf[16];
+  mqttClient.publish(mqttDiscoBinaryConfigTopic.c_str(), mqttDiscoBinaryConfigPayload.c_str(), true);
+  mqttClient.publish(mqttDiscoSignalConfigTopic.c_str(), mqttDiscoSignalConfigPayload.c_str(), true);
+  mqttClient.publish(mqttDiscoUptimeConfigTopic.c_str(), mqttDiscoUptimeConfigPayload.c_str(), true);
+  if (useVoltageGate)
   {
-    Serial.println("MQTT connection failed, rc=" + String(mqttClient.state()));
+    mqttClient.publish(mqttDiscoVoltsConfigTopic.c_str(), mqttDiscoVoltsConfigPayload.c_str(), true);
   }
+
+  mqttClient.publish(mqttDiscoBinaryStateTopic.c_str(), presenceState());
+  snprintf(buf, sizeof(buf), "%d", WiFi.RSSI());
+  mqttClient.publish(mqttDiscoSignalStateTopic.c_str(), buf);
+  snprintf(buf, sizeof(buf), "%lu", millis());
+  mqttClient.publish(mqttDiscoUptimeStateTopic.c_str(), buf);
+  if (useVoltageGate)
+  {
+    snprintf(buf, sizeof(buf), "%.2f", carVolts);
+    mqttClient.publish(mqttDiscoVoltsStateTopic.c_str(), buf);
+  }
+
+  reportTimer = millis();
+  Serial.printf("MQTT connected, presence %s\n", presenceState());
+  digitalWrite(LED_BUILTIN, LOW);
+  return true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // (mostly) boilerplate OTA setup from library examples
 void setupOTA()
 {
-  // Start up OTA
-  // ArduinoOTA.setPort(8266); // Port defaults to 8266
   ArduinoOTA.setHostname(mqttNode.c_str());
   ArduinoOTA.setPassword(otaPassword);
-
-  ArduinoOTA.onStart([]() {
-    Serial.println("ESP OTA:  update start");
-  });
-  ArduinoOTA.onEnd([]() {
-    Serial.println("ESP OTA:  update complete");
-  });
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    //Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
-  });
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.println("ESP OTA:  ERROR code " + String(error));
-    if (error == OTA_AUTH_ERROR)
-      Serial.println("ESP OTA:  ERROR - Auth Failed");
-    else if (error == OTA_BEGIN_ERROR)
-      Serial.println("ESP OTA:  ERROR - Begin Failed");
-    else if (error == OTA_CONNECT_ERROR)
-      Serial.println("ESP OTA:  ERROR - Connect Failed");
-    else if (error == OTA_RECEIVE_ERROR)
-      Serial.println("ESP OTA:  ERROR - Receive Failed");
-    else if (error == OTA_END_ERROR)
-      Serial.println("ESP OTA:  ERROR - End Failed");
-  });
+  ArduinoOTA.onStart([]() { Serial.println("ESP OTA:  update start"); });
+  ArduinoOTA.onEnd([]() { Serial.println("ESP OTA:  update complete"); });
+  ArduinoOTA.onError([](ota_error_t error) { Serial.printf("ESP OTA:  ERROR code %u\n", error); });
   ArduinoOTA.begin();
   Serial.println("ESP OTA:  Over the Air firmware update ready");
 }
