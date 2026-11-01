@@ -48,6 +48,7 @@ The right car's driver sometimes sits in the car with the door open long enough 
 
 - **Driver not home:** the door closes, as before.
 - **Driver home:** their phone gets a time-sensitive notification, "Closing in 2 minutes unless you keep it open", with a **Keep open** button.
+  On iPhone the button only appears after pressing and holding the notification. A plain tap just opens the app and does nothing, so the alert text says so.
   - **No tap within 2 minutes:** the door closes.
   - **Keep open tapped:** the door stays open for 30 minutes, then the driver is asked again. This repeats until they stop tapping or the door is closed.
   - **Door closed any other way:** the alert flow stops, and the notification is cleared.
@@ -291,7 +292,7 @@ actions:
                 - action: notify.mobile_app_driver_phone
                   data:
                     title: Right garage door
-                    message: Open for a while. Closing in 2 minutes unless you keep it open.
+                    message: Open for a while. Closing in 2 minutes. To keep it open, press and hold this notification, then tap Keep open.
                     data:
                       tag: "{{ notify_tag }}"
                       push:
