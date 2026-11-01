@@ -116,6 +116,8 @@ Put the resistor at the 12V end so a chafed wire can't short anything. Ground co
 
 After installing, compare the `CarPresence...-voltage` sensor in Home Assistant to a multimeter at the fuse with the engine running, and set `VOLTS_CALIBRATION` if they differ.
 
+Full build notes, wiring for both options, parts lists and a test checklist are in [docs/voltage-gate.md](docs/voltage-gate.md) and [docs/voltage-gate-parts.xlsx](docs/voltage-gate-parts.xlsx).
+
 ## Departure detection
 
 Because the board powers up whenever the car starts, starting a car that's parked at home would otherwise look like an arrival. In this fork:
