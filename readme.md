@@ -4,7 +4,7 @@
 >
 > * **Settings outside the source.** Wi-Fi and MQTT credentials live in a git-ignored `config.h`, with per-car profiles so one sketch can be flashed to several cars. See [Configuration](#configuration).
 > * **Support for cars with no ignition-switched fuse.** An optional voltage gate reads the car's 12V on A0, so the board only goes online while the engine is running and deep sleeps otherwise. See [Power options](#power-options).
-> * **Departure detection.** Starting the car while it's parked at home no longer reports presence, so it doesn't trigger a garage-open on the way out. See [Departure detection](#departure-detection).
+> * **Departure detection.** Starting the car while it's parked at home no longer reports presence, so it doesn't trigger a garage-open on the way out. A separate `-departed` sensor reports when the car drives away, so the door can close behind it. See [Departure detection](#departure-detection).
 > * **Long-term stability fixes.** Non-blocking Wi-Fi, MQTT reconnect with backoff, rollover-safe timers, no `String` churn in the main loop and a low-memory restart as a last resort.
 > * **Garage door history.** The blueprints write the reason for each open and close to the Home Assistant logbook, so a dashboard card can show why the door moved. See [Garage door history](#garage-door-history).
 
@@ -83,6 +83,7 @@ Each profile sets:
 | `USE_VOLTAGE_GATE` | `false` for ignition-switched power, `true` for constant power with the A0 voltage gate. See [Power options](#power-options). |
 | `ADC_FULL_SCALE_VOLTS` | Voltage gate only: full-scale voltage of your A0 divider. `18.2f` for a 1.5MΩ series resistor, `16.0f` for a 0–25V voltage sensor module. |
 | `VOLTS_CALIBRATION` | Voltage gate only: multimeter reading ÷ reported voltage. Defaults to `1.0f`. |
+| `WIFI_STATIC_IP`, `WIFI_GATEWAY` | Optional fixed address for this board, which connects faster than DHCP. See [Connection speed](#connection-speed). |
 
 To add another car, copy a profile block, give it a new `PROFILE_...` name and a unique `MQTT_NODE`.
 
@@ -131,6 +132,25 @@ This changes the workflows above. Starting the car in the garage **does not open
 
 The timings (`departureWindowMs`, `departureClearMs`, `parkedSleepWakes`) are near the top of the sketch.
 
+### Drive-away sensor
+
+To close the door behind a departing car, each board also publishes a `binary_sensor.<mqtt_node>_departed` sensor, for example `binary_sensor.carpresenceright_departed`. During a departure the board watches a smoothed copy of its Wi-Fi signal. If the signal was strong first (−70 dBm or better, so the car started in or near the garage) and then fades below −80 dBm, the car is pulling away. The board reports `departed` ON while it still has a connection, and the sensor turns itself OFF a minute later. Use it as a trigger to close the door:
+
+```yaml
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.carpresenceright_departed
+    to: "on"
+actions:
+  - action: cover.close_cover
+    target:
+      entity_id: cover.garage_door
+```
+
+A car that's switched off or falls asleep in the garage loses power without the signal fading first, so it never reports departed. Sitting in the car with the door open is safe.
+
+On two real departures, the sensor would have fired 6–10 seconds before the board lost Wi-Fi. If your garage signal is weaker, or the board loses Wi-Fi before reporting, adjust `departNearRssi` and `departFarRssi` near the top of the sketch. The `-signal` sensor shows what your board sees in the garage and on the way out.
+
 ## Garage door history
 
 Each time the blueprint opens or closes the door, it first adds a logbook entry with the reason, attached to the garage door entity:
@@ -153,6 +173,16 @@ entities:
 The card lists every open and close of the door, not just the automatic ones. Car presence moves show the entry above. Opens from the app or another automation show Home Assistant's own "triggered by" note. Opens from a wall button or remote have no reason attached. Including the presence sensors shows when each car came and went, which helps explain a door that didn't move. Change `hours_to_show` to look further back; how far you can go depends on your recorder's `purge_keep_days` (10 days by default).
 
 If you imported the blueprint before this was added, the copy in Home Assistant still points at the original repository, so **Re-import blueprint** won't pick up the change. Import it again from the button above, or replace the file in `config/blueprints/automation/` with the one from this repository, then reload automations.
+
+## Connection speed
+
+The faster the board connects after the car starts, the sooner presence and the drive-away sensor work. Without any of the options below, the board took about 4.5 seconds from power-on to MQTT on our cars. Most of that is scanning for the network, getting an address from DHCP and looking up the broker's name.
+
+* **Remembered access point (automatic).** The board saves the access point and channel it last joined in flash and goes straight to it next time, without scanning. If that access point doesn't answer within 3 seconds, the board falls back to a full scan. That can happen when a different mesh node is closer, or the router changed channel. The board only writes to flash when the access point changes. After losing Wi-Fi, it reconnects to whichever access point is in range.
+* **Static IP (optional).** Set `WIFI_STATIC_IP` and `WIFI_GATEWAY` in the car's profile to skip DHCP. Reserve the address on your router, outside the DHCP pool, and give each car its own. `WIFI_SUBNET` defaults to `255.255.255.0` and `WIFI_DNS` to the gateway. Leave them out to use DHCP.
+* **Broker by IP (optional).** Set `MQTT_SERVER` to the broker's IP address instead of a hostname to skip the DNS lookup.
+
+The serial monitor shows the timings in lines such as `Wi-Fi connected in … ms` and `MQTT connected at … ms`.
 
 ## Over-the-air updates
 

@@ -20,8 +20,8 @@ Identifying details are replaced with placeholders. To restore an automation, sw
 |---|---|---|---|
 | Auto Open Left Garage | Left car presence turns `on` | Presence had been in its previous state over 4 minutes | Open left door |
 | Auto Open Right Garage | Right car presence turns `on` | Same 4-minute check; time 06:00–midnight; the driver's phone is not on `HOME_SSID` | Open right door |
-| Auto Close Left Garage | Left car presence turns `off`, or left door open 15 minutes | None | Close left door |
-| Auto Close Right Garage | Right car presence turns `off`, or right door open 15 minutes | None | Car off: close right door. Open 15 minutes: alert the driver first if they're home (see below) |
+| Auto Close Left Garage | Left car drives away (`_departed`), left car presence turns `off`, or left door open 15 minutes | None | Close left door |
+| Auto Close Right Garage | Right car drives away (`_departed`), right car presence turns `off`, or right door open 15 minutes | None | Car off: close right door. Open 15 minutes: alert the driver first if they're home (see below) |
 
 The automations target the doors by entity ID, not device ID. If an opener is replaced, give the new door entity the old entity ID (Settings → Entities → the entity → Entity ID) and the automations keep working.
 
@@ -29,8 +29,8 @@ The automations target the doors by entity ID, not device ID. If an opener is re
 
 | Situation | Presence sensor | Door |
 |---|---|---|
-| Car started in the garage (departure) | Stays `off` (departure detection) | Not opened. Open it yourself. Closes after being open 15 minutes. |
-| Driving away | Stays `off` | No change from the car. The 15-minute rule closes it if it was left open. |
+| Car started in the garage (departure) | Stays `off` (departure detection) | Not opened. Open it yourself. |
+| Driving away | Stays `off`; `_departed` turns `on` as the Wi-Fi signal fades | Closes as the car pulls away. The 15-minute rule is the backup. |
 | Arriving home (out of range for over 2 min, sensor off for over 4 min) | `on` | Opens. Right door: only 06:00–midnight and when the driver's phone isn't already on home Wi-Fi. |
 | Car turned off in the garage | `off` within about 20 s (MQTT last will) | Closes right away. |
 | Door left open with no car event | — | Closes after 15 minutes. |
@@ -61,6 +61,7 @@ Before each door command, the automation writes a `logbook.log` entry attached t
 
 - `opening: CarPresenceRight arrived home (away 47 min)`
 - `closing: CarPresenceRight went offline (car turned off)`
+- `closing: CarPresenceRight drove away`
 - `closing: left open for 15 minutes`
 - `alert sent to the driver: closing in 2 minutes unless kept open` (right door)
 - `kept open for 30 minutes (the driver tapped Keep open)` (right door)
@@ -180,8 +181,13 @@ mode: single
 
 ```yaml
 alias: Auto Close Left Garage
-description: Closes the door when the car's presence sensor turns off (car switched off) or the door has been open 15 minutes. Logs the reason to the logbook.
+description: Closes the door when the car drives away (departed sensor), when the car's presence sensor turns off (car switched off), or when the door has been open 15 minutes. Logs the reason to the logbook.
 triggers:
+- trigger: state
+  entity_id:
+  - binary_sensor.carpresenceleft_departed
+  to: 'on'
+  id: departed
 - entity_id:
   - binary_sensor.carpresenceleft
   to: 'off'
@@ -208,7 +214,7 @@ actions:
   - action: logbook.log
     data:
       name: "{{ state_attr('cover.left_garage_door', 'friendly_name') }}"
-      message: "{% if trigger.id == 'car_off' %}closing: CarPresenceLeft went offline (car turned off){% else %}closing: left open for 15 minutes{% endif %}"
+      message: "{% if trigger.id == 'departed' %}closing: CarPresenceLeft drove away{% elif trigger.id == 'car_off' %}closing: CarPresenceLeft went offline (car turned off){% else %}closing: left open for 15 minutes{% endif %}"
       entity_id: cover.left_garage_door
 - metadata: {}
   data: {}
@@ -222,139 +228,157 @@ mode: single
 
 ```yaml
 alias: Auto Close Right Garage
-description: >-
-  Closes the right door when the car's presence sensor turns off (car switched off),
-  or when the door has been open 15 minutes. For the 15-minute case, if the driver is home
-  the driver's phone gets a "Keep open" alert first; tapping it holds the door for 30 minutes,
-  then they are asked again. No answer within 2 minutes closes the door. Logs every step.
+description: 'Closes the right door when the car drives away (departed sensor) or its presence sensor turns off (car switched off). When the door has been open 15 minutes: if the driver is home the driver''s phone gets a "Keep open" alert first; tapping it holds the door for 30 minutes, then they are asked again. No answer within 2 minutes closes the door. Logs every step.'
+triggers:
+- trigger: state
+  entity_id:
+  - binary_sensor.carpresenceright_departed
+  to: 'on'
+  id: departed
+- trigger: state
+  entity_id:
+  - binary_sensor.carpresenceright
+  to: 'off'
+  id: car_off
+- trigger: state
+  entity_id:
+  - cover.right_garage_door
+  to: open
+  for:
+    minutes: 15
+  id: open_15m
+conditions: []
+actions:
+- choose:
+  - conditions:
+    - condition: trigger
+      id: departed
+    sequence:
+    - if:
+      - condition: state
+        entity_id: cover.right_garage_door
+        state: open
+      then:
+      - action: logbook.log
+        data:
+          name: "{{ state_attr(door, 'friendly_name') }}"
+          message: 'closing: CarPresenceRight drove away'
+          entity_id: cover.right_garage_door
+    - action: cover.close_cover
+      target:
+        entity_id: cover.right_garage_door
+  - conditions:
+    - condition: trigger
+      id: car_off
+    sequence:
+    - if:
+      - condition: state
+        entity_id: cover.right_garage_door
+        state: open
+      then:
+      - action: logbook.log
+        data:
+          name: "{{ state_attr(door, 'friendly_name') }}"
+          message: 'closing: CarPresenceRight went offline (car turned off)'
+          entity_id: cover.right_garage_door
+    - action: cover.close_cover
+      target:
+        entity_id: cover.right_garage_door
+  - conditions:
+    - condition: trigger
+      id: open_15m
+    - condition: not
+      conditions:
+      - condition: state
+        entity_id: person.driver
+        state: home
+    sequence:
+    - action: logbook.log
+      data:
+        name: "{{ state_attr(door, 'friendly_name') }}"
+        message: 'closing: left open for 15 minutes (the driver not home, no alert)'
+        entity_id: cover.right_garage_door
+    - action: cover.close_cover
+      target:
+        entity_id: cover.right_garage_door
+  - conditions:
+    - condition: trigger
+      id: open_15m
+    sequence:
+    - repeat:
+        sequence:
+        - action: notify.mobile_app_driver_phone
+          data:
+            title: Right garage door
+            message: Open for a while. Closing in 2 minutes. To keep it open, press and hold this notification, then tap Keep open.
+            data:
+              tag: "{{ notify_tag }}"
+              push:
+                interruption-level: time-sensitive
+              actions:
+              - action: "{{ keep_action }}"
+                title: Keep open
+        - action: logbook.log
+          data:
+            name: "{{ state_attr(door, 'friendly_name') }}"
+            message: 'alert sent to the driver: closing in 2 minutes unless kept open'
+            entity_id: cover.right_garage_door
+        - wait_for_trigger:
+          - trigger: event
+            event_type: mobile_app_notification_action
+            event_data:
+              action: RIGHT_GARAGE_KEEP_OPEN
+            id: keep
+          - trigger: state
+            entity_id: cover.right_garage_door
+            not_to: open
+            id: door_moved
+          timeout:
+            minutes: 2
+          continue_on_timeout: true
+        - variables:
+            kept: "{{ wait.trigger is not none and wait.trigger.id == 'keep' }}"
+        - if:
+          - condition: template
+            value_template: "{{ kept }}"
+          then:
+          - action: logbook.log
+            data:
+              name: "{{ state_attr(door, 'friendly_name') }}"
+              message: kept open for 30 minutes (the driver tapped Keep open)
+              entity_id: cover.right_garage_door
+          - wait_for_trigger:
+            - trigger: state
+              entity_id: cover.right_garage_door
+              not_to: open
+            timeout:
+              minutes: 30
+            continue_on_timeout: true
+        until:
+        - condition: template
+          value_template: "{{ not kept or not is_state(door, 'open') }}"
+    - action: notify.mobile_app_driver_phone
+      data:
+        message: clear_notification
+        data:
+          tag: "{{ notify_tag }}"
+    - if:
+      - condition: state
+        entity_id: cover.right_garage_door
+        state: open
+      then:
+      - action: logbook.log
+        data:
+          name: "{{ state_attr(door, 'friendly_name') }}"
+          message: 'closing: left open, no response to the driver''s alert'
+          entity_id: cover.right_garage_door
+      - action: cover.close_cover
+        target:
+          entity_id: cover.right_garage_door
 mode: restart
 variables:
   door: cover.right_garage_door
   notify_tag: right-garage-auto-close
   keep_action: RIGHT_GARAGE_KEEP_OPEN
   kept: false
-triggers:
-  - trigger: state
-    entity_id:
-      - binary_sensor.carpresenceright
-    to: "off"
-    id: car_off
-  - trigger: state
-    entity_id:
-      - cover.right_garage_door
-    to: open
-    for:
-      minutes: 15
-    id: open_15m
-conditions: []
-actions:
-  - choose:
-      - conditions:
-          - condition: trigger
-            id: car_off
-        sequence:
-          - if:
-              - condition: state
-                entity_id: cover.right_garage_door
-                state: open
-            then:
-              - action: logbook.log
-                data:
-                  name: "{{ state_attr(door, 'friendly_name') }}"
-                  message: "closing: CarPresenceRight went offline (car turned off)"
-                  entity_id: cover.right_garage_door
-          - action: cover.close_cover
-            target:
-              entity_id: cover.right_garage_door
-      - conditions:
-          - condition: trigger
-            id: open_15m
-          - condition: not
-            conditions:
-              - condition: state
-                entity_id: person.driver
-                state: home
-        sequence:
-          - action: logbook.log
-            data:
-              name: "{{ state_attr(door, 'friendly_name') }}"
-              message: "closing: left open for 15 minutes (the driver not home, no alert)"
-              entity_id: cover.right_garage_door
-          - action: cover.close_cover
-            target:
-              entity_id: cover.right_garage_door
-      - conditions:
-          - condition: trigger
-            id: open_15m
-        sequence:
-          - repeat:
-              sequence:
-                - action: notify.mobile_app_driver_phone
-                  data:
-                    title: Right garage door
-                    message: Open for a while. Closing in 2 minutes. To keep it open, press and hold this notification, then tap Keep open.
-                    data:
-                      tag: "{{ notify_tag }}"
-                      push:
-                        interruption-level: time-sensitive
-                      actions:
-                        - action: "{{ keep_action }}"
-                          title: Keep open
-                - action: logbook.log
-                  data:
-                    name: "{{ state_attr(door, 'friendly_name') }}"
-                    message: "alert sent to the driver: closing in 2 minutes unless kept open"
-                    entity_id: cover.right_garage_door
-                - wait_for_trigger:
-                    - trigger: event
-                      event_type: mobile_app_notification_action
-                      event_data:
-                        action: RIGHT_GARAGE_KEEP_OPEN
-                      id: keep
-                    - trigger: state
-                      entity_id: cover.right_garage_door
-                      not_to: open
-                      id: door_moved
-                  timeout:
-                    minutes: 2
-                  continue_on_timeout: true
-                - variables:
-                    kept: "{{ wait.trigger is not none and wait.trigger.id == 'keep' }}"
-                - if:
-                    - condition: template
-                      value_template: "{{ kept }}"
-                  then:
-                    - action: logbook.log
-                      data:
-                        name: "{{ state_attr(door, 'friendly_name') }}"
-                        message: "kept open for 30 minutes (the driver tapped Keep open)"
-                        entity_id: cover.right_garage_door
-                    - wait_for_trigger:
-                        - trigger: state
-                          entity_id: cover.right_garage_door
-                          not_to: open
-                      timeout:
-                        minutes: 30
-                      continue_on_timeout: true
-              until:
-                - condition: template
-                  value_template: "{{ not kept or not is_state(door, 'open') }}"
-          - action: notify.mobile_app_driver_phone
-            data:
-              message: clear_notification
-              data:
-                tag: "{{ notify_tag }}"
-          - if:
-              - condition: state
-                entity_id: cover.right_garage_door
-                state: open
-            then:
-              - action: logbook.log
-                data:
-                  name: "{{ state_attr(door, 'friendly_name') }}"
-                  message: "closing: left open, no response to the driver's alert"
-                  entity_id: cover.right_garage_door
-              - action: cover.close_cover
-                target:
-                  entity_id: cover.right_garage_door
 ```

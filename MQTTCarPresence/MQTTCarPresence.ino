@@ -16,6 +16,18 @@
 #ifndef VOLTS_CALIBRATION
 #define VOLTS_CALIBRATION 1.0f
 #endif
+#ifndef WIFI_STATIC_IP
+#define WIFI_STATIC_IP "" // "" uses DHCP
+#endif
+#ifndef WIFI_GATEWAY
+#define WIFI_GATEWAY ""
+#endif
+#ifndef WIFI_SUBNET
+#define WIFI_SUBNET "255.255.255.0"
+#endif
+#ifndef WIFI_DNS
+#define WIFI_DNS "" // defaults to the gateway
+#endif
 
 const char *wifiSSID = WIFI_SSID;
 const char *wifiPassword = WIFI_PASSWORD;
@@ -25,6 +37,22 @@ const char *mqttUser = MQTT_USER;
 const char *mqttPassword = MQTT_PASSWORD;
 const String mqttNode = MQTT_NODE;
 const String mqttDiscoveryPrefix = MQTT_DISCOVERY_PREFIX;
+const char *wifiStaticIp = WIFI_STATIC_IP;
+const char *wifiGateway = WIFI_GATEWAY;
+const char *wifiSubnet = WIFI_SUBNET;
+const char *wifiDns = WIFI_DNS;
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// Fast Wi-Fi connect
+//
+// A normal connect scans every channel for the network, which takes a second or two. The board saves
+// the access point (BSSID) and channel it last joined in flash and goes straight to it on the next boot.
+// If that access point doesn't answer within fastConnectTimeoutMs (a different mesh node is closer, or
+// the router changed channel), it falls back to a full scan. Flash is only written when the access
+// point or channel changes. Set WIFI_STATIC_IP in config.h to skip DHCP as well, and use an IP address
+// for MQTT_SERVER to skip the DNS lookup.
+const unsigned long fastConnectTimeoutMs = 3000;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -80,6 +108,17 @@ const unsigned long voltsSampleMs = 1000;        // don't read A0 faster than th
 const unsigned long departureWindowMs = 90000;
 const unsigned long departureClearMs = 120000;
 const uint32_t parkedSleepWakes = 30;            // 30 x 20s = 10 minutes asleep
+
+// Drive-away detection: presence stays OFF while departing, so nothing else tells Home Assistant the car
+// has gone. During a departure session the board watches a smoothed Wi-Fi signal. Once it has been strong
+// (started in the garage) and then fades below departFarRssi, the car is pulling away and the -departed
+// sensor turns ON while the link still works. A car that falls asleep in the garage just loses power, with
+// no fade first, so it never reports departed.
+const float departNearRssi = -70;                // smoothed signal must reach this first (in or near the garage)
+const float departFarRssi = -80;                 // then fall below this
+const float rssiSmoothing = 0.3f;                // weight of each new sample; rides out single-sample blips
+const unsigned long rssiSampleMs = 500;
+const unsigned long departedReportWindowMs = 10000; // drop a departed report that couldn't be sent by then
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Home Assistant MQTT Discovery, see https://home-assistant.io/docs/mqtt/discovery/
@@ -93,17 +132,22 @@ const String mqttDiscoUptimeConfigTopic = mqttDiscoveryPrefix + "/sensor/" + mqt
 // New: car battery voltage, for tuning the thresholds above
 const String mqttDiscoVoltsStateTopic = mqttDiscoveryPrefix + "/sensor/" + mqttNode + "-voltage/state";
 const String mqttDiscoVoltsConfigTopic = mqttDiscoveryPrefix + "/sensor/" + mqttNode + "-voltage/config";
+// New: turns ON for a minute when the car drives away from home
+const String mqttDiscoDepartedStateTopic = mqttDiscoveryPrefix + "/binary_sensor/" + mqttNode + "-departed/state";
+const String mqttDiscoDepartedConfigTopic = mqttDiscoveryPrefix + "/binary_sensor/" + mqttNode + "-departed/config";
 
 const String mqttDiscoBinaryConfigPayload = "{\"name\": \"" + mqttNode + "\", \"device_class\": \"connectivity\", \"state_topic\": \"" + mqttDiscoBinaryStateTopic + "\"}";
 const String mqttDiscoSignalConfigPayload = "{\"name\": \"" + mqttNode + "-signal\", \"state_topic\": \"" + mqttDiscoSignalStateTopic + "\", \"unit_of_measurement\": \"dBm\", \"value_template\": \"{{ value }}\"}";
 const String mqttDiscoUptimeConfigPayload = "{\"name\": \"" + mqttNode + "-uptime\", \"state_topic\": \"" + mqttDiscoUptimeStateTopic + "\", \"unit_of_measurement\": \"msec\", \"value_template\": \"{{ value }}\"}";
 const String mqttDiscoVoltsConfigPayload = "{\"name\": \"" + mqttNode + "-voltage\", \"state_topic\": \"" + mqttDiscoVoltsStateTopic + "\", \"unit_of_measurement\": \"V\", \"device_class\": \"voltage\", \"state_class\": \"measurement\"}";
+const String mqttDiscoDepartedConfigPayload = "{\"name\": \"" + mqttNode + "-departed\", \"state_topic\": \"" + mqttDiscoDepartedStateTopic + "\", \"off_delay\": 60}";
 
 // Reporting and LED timing
 const unsigned long reportInterval = 5000;
 const unsigned long twinkleInterval = 50;
 
 #include <ESP8266WiFi.h>
+#include <EEPROM.h>
 #include <ESP8266mDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
@@ -126,6 +170,24 @@ bool everConnected = false;
 bool departureSession = false;
 bool otaStarted = false;
 bool wasParked = true;
+unsigned long lastRssiSampleMs = 0;
+float smoothedRssi = 0;                          // 0 = no sample yet
+bool sawStrongSignal = false;
+bool departed = false;                           // signal faded; stop watching
+bool departedReported = false;                   // published to MQTT (or dropped as too old)
+unsigned long departedAtMs = 0;
+unsigned long wifiBeginMs = 0;
+bool fastConnecting = false;
+
+// Last access point joined, kept in flash so it survives power loss
+struct ApCache
+{
+  uint32_t magic;
+  uint8_t channel;
+  uint8_t bssid[6];
+};
+const uint32_t apCacheMagic = 0xAC0FFEE1;
+ApCache apCache;
 
 // Survives deep sleep (RTC user memory), reset on power loss
 struct RtcState
@@ -142,6 +204,9 @@ float readCarVolts();
 void goToSleep();
 bool mqttConnect();
 void setupOTA();
+void startWifi();
+void rememberAccessPoint();
+void watchSignal(unsigned long now);
 const char *presenceState() { return departureSession ? "OFF" : "ON"; }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -191,7 +256,7 @@ void setup()
   WiFi.mode(WIFI_STA);
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
   WiFi.setAutoReconnect(true);
-  WiFi.begin(wifiSSID, wifiPassword); // non-blocking; loop() watches the status
+  startWifi(); // non-blocking; loop() watches the status
 
   mqttClient.setServer(mqttServer, 1883);
   mqttClient.setBufferSize(512);  // discovery payloads exceed the default 128
@@ -225,9 +290,19 @@ void loop()
 
   bool wifiUp = (WiFi.status() == WL_CONNECTED);
 
+  if (!wifiUp && fastConnecting && now - wifiBeginMs >= fastConnectTimeoutMs)
+  {
+    Serial.println("Saved access point didn't answer, scanning");
+    fastConnecting = false;
+    WiFi.begin(wifiSSID, wifiPassword);
+  }
+
   if (wifiUp && !wifiWasConnected)
   {
-    Serial.printf("Wi-Fi connected, IP %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("Wi-Fi connected in %lu ms, IP %s, channel %d, %d dBm\n", now - wifiBeginMs,
+                  WiFi.localIP().toString().c_str(), WiFi.channel(), WiFi.RSSI());
+    fastConnecting = false;
+    rememberAccessPoint();
     if (!everConnected)
     {
       everConnected = true;
@@ -244,6 +319,8 @@ void loop()
     Serial.println("Wi-Fi lost");
     wifiLostMs = now;
     digitalWrite(LED_BUILTIN, HIGH);
+    // Reconnect to whichever access point is in range when the car comes back, not just the saved one
+    WiFi.begin(wifiSSID, wifiPassword);
   }
   else if (!wifiUp && departureSession && (now - wifiLostMs >= departureClearMs))
   {
@@ -258,6 +335,14 @@ void loop()
     {
       setupOTA();
       otaStarted = true;
+    }
+
+    // Watch from the moment Wi-Fi is up, so a car that's already pulling out by the time MQTT connects
+    // still sees its strong in-garage signal first
+    if (departureSession && !departed && now - lastRssiSampleMs >= rssiSampleMs)
+    {
+      lastRssiSampleMs = now;
+      watchSignal(now);
     }
 
     if (!mqttClient.connected())
@@ -278,6 +363,21 @@ void loop()
     else
     {
       mqttClient.loop();
+
+      if (departed && !departedReported)
+      {
+        // Only while it's news: a report that couldn't go out before the link dropped must not
+        // turn up on a later connection, such as arriving home
+        if (departureSession && now - departedAtMs <= departedReportWindowMs)
+        {
+          departedReported = mqttClient.publish(mqttDiscoDepartedStateTopic.c_str(), "ON");
+        }
+        else
+        {
+          Serial.println("Departed report too old, dropping it");
+          departedReported = true;
+        }
+      }
 
       if (now - twinkleTimer >= twinkleInterval)
       {
@@ -354,6 +454,75 @@ void goToSleep()
   ESP.deepSleep(sleepIntervalUs);
 }
 
+// Start connecting: static IP if configured, and straight to the saved access point if there is one
+void startWifi()
+{
+  if (wifiStaticIp[0])
+  {
+    IPAddress ip, gateway, subnet, dns;
+    if (ip.fromString(wifiStaticIp) && gateway.fromString(wifiGateway) && subnet.fromString(wifiSubnet))
+    {
+      if (!dns.fromString(wifiDns))
+      {
+        dns = gateway;
+      }
+      WiFi.config(ip, gateway, subnet, dns);
+    }
+    else
+    {
+      Serial.println("WIFI_STATIC_IP, WIFI_GATEWAY or WIFI_SUBNET is not a valid address, using DHCP");
+    }
+  }
+
+  EEPROM.begin(sizeof(ApCache));
+  EEPROM.get(0, apCache);
+  wifiBeginMs = millis();
+  if (apCache.magic == apCacheMagic && apCache.channel >= 1 && apCache.channel <= 14)
+  {
+    Serial.printf("Connecting to saved access point on channel %d\n", apCache.channel);
+    fastConnecting = true;
+    WiFi.begin(wifiSSID, wifiPassword, apCache.channel, apCache.bssid);
+  }
+  else
+  {
+    WiFi.begin(wifiSSID, wifiPassword);
+  }
+}
+
+// Save the access point and channel we joined, only if they changed (each write wears the flash)
+void rememberAccessPoint()
+{
+  uint8_t channel = WiFi.channel();
+  const uint8_t *bssid = WiFi.BSSID();
+  if (apCache.magic == apCacheMagic && apCache.channel == channel && memcmp(apCache.bssid, bssid, 6) == 0)
+  {
+    return;
+  }
+  apCache.magic = apCacheMagic;
+  apCache.channel = channel;
+  memcpy(apCache.bssid, bssid, 6);
+  EEPROM.put(0, apCache);
+  EEPROM.commit();
+  Serial.printf("Saved access point %s, channel %d\n", WiFi.BSSIDstr().c_str(), channel);
+}
+
+// Departure only: smooth the signal and flag "departed" once it has been strong and then fades
+void watchSignal(unsigned long now)
+{
+  int rssi = WiFi.RSSI();
+  smoothedRssi = (smoothedRssi == 0) ? rssi : smoothedRssi + rssiSmoothing * (rssi - smoothedRssi);
+  if (smoothedRssi >= departNearRssi)
+  {
+    sawStrongSignal = true;
+  }
+  else if (sawStrongSignal && smoothedRssi < departFarRssi)
+  {
+    Serial.printf("Signal faded to %.0f dBm at %lu ms: driving away, reporting departed\n", smoothedRssi, now);
+    departed = true;
+    departedAtMs = now;
+  }
+}
+
 // MQTT connection and discovery. Returns true when connected.
 bool mqttConnect()
 {
@@ -370,6 +539,7 @@ bool mqttConnect()
   mqttClient.publish(mqttDiscoBinaryConfigTopic.c_str(), mqttDiscoBinaryConfigPayload.c_str(), true);
   mqttClient.publish(mqttDiscoSignalConfigTopic.c_str(), mqttDiscoSignalConfigPayload.c_str(), true);
   mqttClient.publish(mqttDiscoUptimeConfigTopic.c_str(), mqttDiscoUptimeConfigPayload.c_str(), true);
+  mqttClient.publish(mqttDiscoDepartedConfigTopic.c_str(), mqttDiscoDepartedConfigPayload.c_str(), true);
   if (useVoltageGate)
   {
     mqttClient.publish(mqttDiscoVoltsConfigTopic.c_str(), mqttDiscoVoltsConfigPayload.c_str(), true);
@@ -387,7 +557,7 @@ bool mqttConnect()
   }
 
   reportTimer = millis();
-  Serial.printf("MQTT connected, presence %s\n", presenceState());
+  Serial.printf("MQTT connected at %lu ms, presence %s\n", millis(), presenceState());
   digitalWrite(LED_BUILTIN, LOW);
   return true;
 }
