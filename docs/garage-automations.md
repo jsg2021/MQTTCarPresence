@@ -18,7 +18,7 @@ Identifying details are replaced with placeholders. To restore an automation, sw
 
 | Automation | Trigger | Conditions | Action |
 |---|---|---|---|
-| Auto Open Left Garage | Left car presence turns `on` | Presence had been in its previous state over 4 minutes | Open left door |
+| Auto Open Left Garage | Left car presence turns `on` | Presence had been in its previous state over 4 minutes; time 06:00–midnight | Open left door |
 | Auto Open Right Garage | Right car presence turns `on` | Same 4-minute check; time 06:00–midnight; the driver's phone is not on `HOME_SSID` | Open right door |
 | Auto Close Left Garage | Left car drives away (`_departed`), left car presence turns `off`, or left door open 15 minutes | None | Close left door |
 | Auto Close Right Garage | Right car drives away (`_departed`), right car presence turns `off`, or right door open 15 minutes | None | Car off: close right door. Open 15 minutes: alert the driver first if they're home (see below) |
@@ -31,7 +31,7 @@ The automations target the doors by entity ID, not device ID. If an opener is re
 |---|---|---|
 | Car started in the garage (departure) | Stays `off` (departure detection) | Not opened. Open it yourself. |
 | Driving away | Stays `off`; `_departed` turns `on` as the Wi-Fi signal fades | Closes as the car pulls away. The 15-minute rule is the backup. |
-| Arriving home (out of range for over 2 min, sensor off for over 4 min) | `on` | Opens. Right door: only 06:00–midnight and when the driver's phone isn't already on home Wi-Fi. |
+| Arriving home (out of range for over 2 min, sensor off for over 4 min) | `on` | Opens, only 06:00–midnight. Right door: also only when the driver's phone isn't already on home Wi-Fi. |
 | Car turned off in the garage | `off` within about 20 s (MQTT last will) | Closes right away. |
 | Door left open with no car event | — | Closes after 15 minutes. |
 
@@ -40,7 +40,7 @@ The automations target the doors by entity ID, not device ID. If an opener is re
 - **Close runs even when the door is already closed.** Turning a car off with the door shut sends a close command anyway. The opener ignores it, and no logbook entry is written.
 - **Opening after a Home Assistant or broker restart.** The 4-minute check measures the time since the sensor's last change. If the sensor goes `unavailable` → `on` shortly after a restart, the check fails and the door doesn't open.
 - **Possible race on the right door.** If the phone joins home Wi-Fi before the car's board connects, the open is skipped.
-- **No overnight opens on the right door.** Arrivals between midnight and 06:00 don't open it. The left door has no time window.
+- **No overnight opens.** Arrivals between midnight and 06:00 don't open either door.
 
 ## Keep-open alert (right door)
 
@@ -104,6 +104,9 @@ conditions:
     {{ (trigger.to_state.last_changed|as_timestamp -
       trigger.from_state.last_changed|as_timestamp) / 60 >
       minutes_in_previous_state }}
+- condition: time
+  after: '06:00:00'
+  before: '23:59:59'
 actions:
 - if:
   - condition: state
